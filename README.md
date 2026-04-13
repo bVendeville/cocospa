@@ -1,20 +1,36 @@
-# CoCo: A Tool for Automatically Assessing Conceptual Complexity of Texts ![](https://github.com/ioanahulpus/cocospa/workflows/Java%20CI/badge.svg)
+# CoCo: A Tool for Automatically Assessing Conceptual Complexity and Coherence of Texts
 
-This is the code to run and call an HTTP endpoint that computes the conceptual complexity using spreading activation for a text. We are currently running a Swagger API component onto a server at the [University of Mannheim](http://demaq3.informatik.uni-mannheim.de:8080/swagger-ui.html).
+> Fork of [ioanahulpus/cocospa](https://github.com/ioanahulpus/cocospa) with extended coherence metrics.
+
+This is the code to run and call an HTTP endpoint that computes the conceptual complexity and text coherence using spreading activation over a DBpedia knowledge graph. The original tool was developed at the [University of Mannheim](http://demaq3.informatik.uni-mannheim.de:8080/swagger-ui.html).
+
+### What this fork adds
+
+In addition to the original complexity score, the API now returns a rich set of **coherence metrics** derived from the spreading activation process:
+
+- **Graph connectivity** - activated node count, entity counts, relationship traversals, exclusivity scores
+- **Activation dynamics** - activation levels at encounter, end-of-sentence, end-of-paragraph, and end-of-document, plus decay rate and stability
+- **Distance metrics** - token/sentence/paragraph distances between entity mentions
+- **Text structure** - sentence/paragraph counts, entity density, coverage ratios
+- **Concept reactivation** - remention counts, entity persistence across paragraphs
+- **Pairwise entity relatedness** - cross-activation between entity pairs (document and paragraph level)
+- **Composite scores** - entity cohesion, semantic connectivity, topic persistence, local and global coherence
+
+See [COHERENCE_FEATURES.md](COHERENCE_FEATURES.md) and [COHERENCE_METRICS_EXPLAINED.md](COHERENCE_METRICS_EXPLAINED.md) for full details.
 
 Clone the repo using:
 ```bash
-	git clone --recurse-submodules https://github.com/ioanahulpus/cocospa
+	git clone --recurse-submodules https://github.com/bVendeville/cocospa
 ```
 
 ## Contents
-- [Calling the API](https://github.com/ioanahulpus/cocospa/blob/master/README.md#api)
-	- [Parameter description](https://github.com/ioanahulpus/cocospa/blob/master/README.md#params)
-	- [cURL Example](https://github.com/ioanahulpus/cocospa/blob/master/README.md#curl)
-	- [python Example](https://github.com/ioanahulpus/cocospa/blob/master/README.md#python)
-- [Running the API](https://github.com/ioanahulpus/cocospa/blob/master/README.md#run)
-	- [Using docker](https://github.com/ioanahulpus/cocospa/blob/master/README.md#docker)
-	- [Run natively](https://github.com/ioanahulpus/cocospa/blob/master/README.md#natively)
+- [Calling the API](#api)
+	- [Parameter description](#params)
+	- [cURL Example](#curl)
+	- [python Example](#python)
+- [Running the API](#run)
+	- [Using docker](#docker)
+	- [Run natively](#natively)
 
 
 <a name="api"></a> 
@@ -85,10 +101,19 @@ Calling the API on a single file, simplified (\*.sim) and complex wikipedia (\*.
 which returns:
 ```json
 {
-  "complexityScore" : 0.49564969874355497
+  "complexityScore" : 0.49564969874355497,
+  "coherenceMetrics" : {
+    "activatedNodeCount" : 42,
+    "uniqueEntityCount" : 8,
+    "totalMentionCount" : 15,
+    "entityCohesionScore" : 0.78,
+    "globalCoherenceScore" : 0.68,
+    ...
+  }
 }
 {
-  "complexityScore" : 1.6215938510362011
+  "complexityScore" : 1.6215938510362011,
+  "coherenceMetrics" : { ... }
 }
 ```
 
