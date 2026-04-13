@@ -11,12 +11,17 @@ import com.fasterxml.jackson.annotation.JsonPropertyOrder;
 
 @JsonInclude(JsonInclude.Include.NON_NULL)
 @JsonPropertyOrder(
-{ "complexityScore" })
+{ "complexityScore", "coherenceMetrics" })
 public class TextComplexityAssesmentResponseObject
 {
 
     @JsonProperty("complexityScore")
     private Double complexityScore;
+
+    @JsonProperty("coherenceMetrics")
+    @JsonInclude(JsonInclude.Include.ALWAYS)
+    private CoherenceMetrics coherenceMetrics;
+
     @JsonIgnore
     private Map<String, Object> additionalProperties = new HashMap<String, Object>();
 
@@ -30,6 +35,18 @@ public class TextComplexityAssesmentResponseObject
     public void setComplexityScore(Double complexityScore)
     {
         this.complexityScore = complexityScore;
+    }
+
+    @JsonProperty("coherenceMetrics")
+    public CoherenceMetrics getCoherenceMetrics()
+    {
+        return coherenceMetrics;
+    }
+
+    @JsonProperty("coherenceMetrics")
+    public void setCoherenceMetrics(CoherenceMetrics coherenceMetrics)
+    {
+        this.coherenceMetrics = coherenceMetrics;
     }
 
     @JsonAnyGetter

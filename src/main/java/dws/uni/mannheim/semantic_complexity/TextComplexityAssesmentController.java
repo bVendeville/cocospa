@@ -50,13 +50,14 @@ public class TextComplexityAssesmentController
             modesIndex.put(m.getModeName(), m);
         }
 
-        double complexityScore = TextComplexityAssesment.assess(modesIndex,
+        TextComplexityAssesment.ComplexityResult result = TextComplexityAssesment.assess(modesIndex,
                 complexityRequestObject.getText(),
                 complexityRequestObject.getPhiTo1(),
                 complexityRequestObject.getLinkerThreshold(),
                 Application.dbspotlightURL);
-        response.setComplexityScore(complexityScore);
-        
+        response.setComplexityScore(result.complexityScore);
+        response.setCoherenceMetrics(result.coherenceMetrics);
+
         return response;
     }
 
@@ -84,16 +85,18 @@ public class TextComplexityAssesmentController
             modesIndex.put(m.getModeName(), m);
         }
 
-        double complexityScoreT1 = TextComplexityAssesment.assess(modesIndex,
+        TextComplexityAssesment.ComplexityResult resultT1 = TextComplexityAssesment.assess(modesIndex,
                 comparisonRequestObject.getText1(),
                 comparisonRequestObject.getPhiTo1(),
                 comparisonRequestObject.getLinkerThreshold(),
                 Application.dbspotlightURL);
-        double complexityScoreT2 = TextComplexityAssesment.assess(modesIndex,
+        TextComplexityAssesment.ComplexityResult resultT2 = TextComplexityAssesment.assess(modesIndex,
                 comparisonRequestObject.getText2(),
                 comparisonRequestObject.getPhiTo1(),
                 comparisonRequestObject.getLinkerThreshold(),
                 Application.dbspotlightURL);
+        double complexityScoreT1 = resultT1.complexityScore;
+        double complexityScoreT2 = resultT2.complexityScore;
         response.setText1ComplexityScore(complexityScoreT1);
         response.setText2ComplexityScore(complexityScoreT2);
         if (response.getText1ComplexityScore() == -1 && response.getText2ComplexityScore() == -1)

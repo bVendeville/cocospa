@@ -1,0 +1,7 @@
+data/DBpedia2014Selected.hdt
+data/DBpedia2014Selected.hdt.index
+data/dbpediaNeo4j/
+data/en/
+data/redis/
+target/
+dbpedia-spotlight-model/

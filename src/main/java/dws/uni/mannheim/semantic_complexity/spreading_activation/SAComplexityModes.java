@@ -5,6 +5,7 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -22,6 +23,7 @@ import org.neo4j.graphdb.ResourceIterator;
 import org.neo4j.helpers.collection.IteratorUtil;
 import org.neo4j.tooling.GlobalGraphOperations;
 
+import dws.uni.mannheim.semantic_complexity.CoherenceMetrics;
 import dws.uni.mannheim.semantic_complexity.FeaturedDocument;
 import dws.uni.mannheim.semantic_complexity.LinkedDocument;
 import dws.uni.mannheim.semantic_complexity.Mention;
@@ -147,7 +149,7 @@ public class SAComplexityModes
         return result;
     }
 
-    public void computeComplexityWithSpreadingActivationOncePerEntity(
+    public CoherenceMetrics computeComplexityWithSpreadingActivationOncePerEntity(
             LinkedDocument fdoc, Map<String, Mode> modesIndex, boolean allOnes,
             Map<String, Double> avgActivationsAtEncounter,
             Map<String, Double> avgActivationAtEOS,
@@ -164,7 +166,7 @@ public class SAComplexityModes
                 jedis);
         // System.out.println(fdoc.getPath()
         // +" ALL ENTITIES OF DOC Done, so NOW AGGREGATING .... ");
-        this.aggreagateSpreadingActivationsOncePerEntityJedis(fdoc, modesIndex,
+        CoherenceMetrics metrics = this.aggreagateSpreadingActivationsOncePerEntityJedis(fdoc, modesIndex,
                 allOnes, activationsAtEncounter, activationAtEOS,
                 activationAtEOP, activationAtEODoc, jedis);
 
@@ -209,6 +211,7 @@ public class SAComplexityModes
             avgActivationAtEODoc.put(m, stats.getMean());
         }
 
+        return metrics;
     }
 
     Map<Long, Map<String, Double>> readActivationFromFile(String filename)
@@ -223,7 +226,7 @@ public class SAComplexityModes
         return result;
     }
 
-    private void aggreagateSpreadingActivationsOncePerEntityJedis(
+    private CoherenceMetrics aggreagateSpreadingActivationsOncePerEntityJedis(
             LinkedDocument fdoc, Map<String, Mode> modesIndex, boolean allOnes,
             Map<String, Map<Mention, Double>> activationsAtEncounter,
             Map<String, Map<Mention, Double>> activationAtEOS,
@@ -231,7 +234,16 @@ public class SAComplexityModes
             Map<String, Map<Mention, Double>> activationAtEODoc, Jedis jedis)
     {
 
+        // Initialize coherence metrics
+        CoherenceMetrics metrics = new CoherenceMetrics();
+
         // initializing the result containers;
+        Set<Long> allActivatedNodes = new HashSet<>();
+        Set<String> uniqueEntities = new HashSet<>();
+        Map<String, Integer> entityMentionCount = new HashMap<>();
+        Set<Long> nodeDegreesSum = new HashSet<>();
+        double exclusivitySum = 0.0;
+        int exclusivityCount = 0;
 
         for (String m : modesIndex.keySet())
         {
@@ -239,6 +251,9 @@ public class SAComplexityModes
             for (Mention me : fdoc.getMentions())
             {
                 mentionResults.put(me, 0.0);
+                uniqueEntities.add(me.getMentionedConcept());
+                entityMentionCount.put(me.getMentionedConcept(),
+                    entityMentionCount.getOrDefault(me.getMentionedConcept(), 0) + 1);
             }
             activationsAtEncounter.put(m, mentionResults);
         }
@@ -283,6 +298,15 @@ public class SAComplexityModes
         int currentParagraph = 0;
         int currentSentence = 0;
 
+        // Distance tracking for coherence
+        List<Integer> tokenDistances = new ArrayList<>();
+        List<Integer> sentenceDistances = new ArrayList<>();
+        List<Integer> paragraphDistances = new ArrayList<>();
+        Map<String, Integer> entityFirstMentionSentence = new HashMap<>();
+        Map<String, Integer> entityFirstMentionParagraph = new HashMap<>();
+        Set<Integer> sentencesWithEntities = new HashSet<>();
+        Set<Integer> paragraphsWithEntities = new HashSet<>();
+
         Map<Mention, Map<String, Double>> currentAggregatedActivations = new HashMap<>();
 
         for (Mention m : fdoc.getMentions())
@@ -294,6 +318,25 @@ public class SAComplexityModes
             }
             currentAggregatedActivations.put(m, modeActivations);
         }
+
+        // Pairwise entity relatedness tracking (document-level)
+        // Map: entityURI1 -> entityURI2 -> activation strength
+        Map<String, Map<String, Double>> pairwiseRelatedness = new HashMap<>();
+        Map<String, Double> maxActivationPerEntity = new HashMap<>();
+
+        // Initialize for all unique entities
+        for (String entityUri : uniqueEntities) {
+            pairwiseRelatedness.put(entityUri, new HashMap<>());
+            maxActivationPerEntity.put(entityUri, 0.0);
+        }
+
+        // Paragraph-level pairwise relatedness tracking
+        // Map: paragraphIndex -> (entityURI1 -> entityURI2 -> activation strength)
+        Map<Integer, Map<String, Map<String, Double>>> pairwiseRelatednessPerParagraph = new HashMap<>();
+        // Map: paragraphIndex -> entityURI -> max activation in that paragraph
+        Map<Integer, Map<String, Double>> maxActivationPerEntityPerParagraph = new HashMap<>();
+        // Map: paragraphIndex -> set of entity URIs in that paragraph
+        Map<Integer, Set<String>> entitiesPerParagraph = new HashMap<>();
 
         try
         {
@@ -318,6 +361,30 @@ public class SAComplexityModes
                                 mention.getMentionedConcept());
                         double seedImportance = log2(seed.getDegree() + 1)
                                 / DEGREE_LOG_NORMALIZATION;
+
+                        // Track node degree for metrics
+                        nodeDegreesSum.add((long) seed.getDegree());
+
+                        // Track sentence and paragraph coverage
+                        sentencesWithEntities.add(currentSentence);
+                        paragraphsWithEntities.add(currentParagraph);
+
+                        // Track entity persistence across paragraphs
+                        String entityConcept = mention.getMentionedConcept();
+                        if (!entityFirstMentionParagraph.containsKey(entityConcept)) {
+                            entityFirstMentionParagraph.put(entityConcept, currentParagraph);
+                        }
+                        if (!entityFirstMentionSentence.containsKey(entityConcept)) {
+                            entityFirstMentionSentence.put(entityConcept, currentSentence);
+                        }
+
+                        // Track entities per paragraph for paragraph-level pairwise relatedness
+                        if (!entitiesPerParagraph.containsKey(currentParagraph)) {
+                            entitiesPerParagraph.put(currentParagraph, new HashSet<>());
+                            pairwiseRelatednessPerParagraph.put(currentParagraph, new HashMap<>());
+                            maxActivationPerEntityPerParagraph.put(currentParagraph, new HashMap<>());
+                        }
+                        entitiesPerParagraph.get(currentParagraph).add(entityConcept);
 
                         // System.out.println("Reading mention : " +i + " - " +
                         // mention.getMentionedConcept());
@@ -345,13 +412,23 @@ public class SAComplexityModes
                                 deltaToken = 0; // this can happen due to
                                                 // puctuation or titles and
                                                 // other noise in text
+
+                            // Track distances for coherence metrics
+                            tokenDistances.add(deltaToken);
+
                             // System.out.println("delta token: " + deltaToken);
                             int deltaSentence = currentSentence
                                     - prevMentionSentenceIndex;
+
+                            sentenceDistances.add(deltaSentence);
+
                             // System.out.println("delta sentence: " +
                             // deltaSentence);
                             int deltaParagraph = currentParagraph
                                     - prevMentionParagraphIndex;
+
+                            paragraphDistances.add(deltaParagraph);
+
                             // System.out.println("delta paragraph: " +
                             // deltaParagraph);
 
@@ -491,6 +568,7 @@ public class SAComplexityModes
                                 if (jedis.exists(seed.getId() + "->"
                                         + mention2.getId()))
                                 {
+                                    allActivatedNodes.add(mention2.getId());
                                     Map<String, String> freshTidalActivations = jedis
                                             .hgetAll(seed.getId() + "->"
                                                     + mention2.getId());
@@ -528,6 +606,33 @@ public class SAComplexityModes
                                             currentAggregatedActivations.get(
                                                     mentionCurrAct.getKey())
                                                     .put(mode, currValue);
+
+                                            // Track pairwise entity relatedness (document-level)
+                                            // Only track if target is also a seed entity (from uniqueEntities)
+                                            String sourceEntity = mention.getMentionedConcept();
+                                            String targetEntity = mentionCurrAct.getKey().getMentionedConcept();
+                                            if (uniqueEntities.contains(targetEntity) && !sourceEntity.equals(targetEntity)) {
+                                                // Record cross-activation from source to target (document-level)
+                                                double existingActivation = pairwiseRelatedness.get(sourceEntity)
+                                                    .getOrDefault(targetEntity, 0.0);
+                                                pairwiseRelatedness.get(sourceEntity).put(targetEntity,
+                                                    Math.max(existingActivation, freshValue));
+
+                                                // Track paragraph-level pairwise relatedness
+                                                // Only track if both entities are in the same paragraph
+                                                if (entitiesPerParagraph.get(currentParagraph).contains(sourceEntity) &&
+                                                    entitiesPerParagraph.get(currentParagraph).contains(targetEntity)) {
+                                                    // Initialize source entity map if needed
+                                                    if (!pairwiseRelatednessPerParagraph.get(currentParagraph).containsKey(sourceEntity)) {
+                                                        pairwiseRelatednessPerParagraph.get(currentParagraph).put(sourceEntity, new HashMap<>());
+                                                    }
+                                                    // Record cross-activation for this paragraph
+                                                    double existingParaActivation = pairwiseRelatednessPerParagraph.get(currentParagraph)
+                                                        .get(sourceEntity).getOrDefault(targetEntity, 0.0);
+                                                    pairwiseRelatednessPerParagraph.get(currentParagraph).get(sourceEntity).put(targetEntity,
+                                                        Math.max(existingParaActivation, freshValue));
+                                                }
+                                            }
                                         }
                                     }
                                 } else
@@ -645,6 +750,17 @@ public class SAComplexityModes
                             // activationAtEOS.get(e.getKey()).put(m,
                             // e.getValue()==0.0 ? 0.0 :
                             // e.getValue()/normalisingConstantPerMode.get(e.getKey()));
+
+                            // Track maximum activation for each entity (document-level)
+                            String entityUri = m.getMentionedConcept();
+                            double currentMax = maxActivationPerEntity.getOrDefault(entityUri, 0.0);
+                            maxActivationPerEntity.put(entityUri, Math.max(currentMax, e.getValue()));
+
+                            // Track maximum activation per entity per paragraph
+                            double currentParaMax = maxActivationPerEntityPerParagraph.get(currentParagraph)
+                                .getOrDefault(entityUri, 0.0);
+                            maxActivationPerEntityPerParagraph.get(currentParagraph).put(entityUri,
+                                Math.max(currentParaMax, e.getValue()));
                         }
                     }
                     currentSentence++;
@@ -693,6 +809,594 @@ public class SAComplexityModes
         } catch (Exception ex)
         {
             ex.printStackTrace();
+        }
+
+        // Populate coherence metrics from collected data
+        metrics.activatedNodeCount = allActivatedNodes.size();
+        metrics.uniqueEntityCount = uniqueEntities.size();
+        metrics.totalMentionCount = fdoc.getMentions().size();
+
+        // Entity repetition ratio
+        if (metrics.uniqueEntityCount > 0) {
+            metrics.entityRepetitionRatio = (double) metrics.totalMentionCount / metrics.uniqueEntityCount;
+        }
+
+        // Node degree statistics
+        if (!nodeDegreesSum.isEmpty()) {
+            long degreeSum = 0;
+            for (Long degree : nodeDegreesSum) {
+                degreeSum += degree;
+            }
+            metrics.avgNodeDegree = (double) degreeSum / nodeDegreesSum.size();
+        }
+
+        // Distance metrics
+        if (!tokenDistances.isEmpty()) {
+            int sum = 0;
+            int max = 0;
+            for (Integer dist : tokenDistances) {
+                sum += dist;
+                if (dist > max) max = dist;
+            }
+            metrics.avgTokenDistance = (double) sum / tokenDistances.size();
+            metrics.maxTokenDistance = max;
+
+            // Compute standard deviation
+            double variance = 0.0;
+            for (Integer dist : tokenDistances) {
+                variance += Math.pow(dist - metrics.avgTokenDistance, 2);
+            }
+            metrics.stdTokenDistance = Math.sqrt(variance / tokenDistances.size());
+        }
+
+        if (!sentenceDistances.isEmpty()) {
+            int sum = 0;
+            int max = 0;
+            for (Integer dist : sentenceDistances) {
+                sum += dist;
+                if (dist > max) max = dist;
+            }
+            metrics.avgSentenceDistance = (double) sum / sentenceDistances.size();
+            metrics.maxSentenceDistance = max;
+
+            // Compute standard deviation
+            double variance = 0.0;
+            for (Integer dist : sentenceDistances) {
+                variance += Math.pow(dist - metrics.avgSentenceDistance, 2);
+            }
+            metrics.stdSentenceDistance = Math.sqrt(variance / sentenceDistances.size());
+        }
+
+        if (!paragraphDistances.isEmpty()) {
+            int sum = 0;
+            int max = 0;
+            for (Integer dist : paragraphDistances) {
+                sum += dist;
+                if (dist > max) max = dist;
+            }
+            metrics.avgParagraphDistance = (double) sum / paragraphDistances.size();
+            metrics.maxParagraphDistance = max;
+
+            // Compute standard deviation
+            double variance = 0.0;
+            for (Integer dist : paragraphDistances) {
+                variance += Math.pow(dist - metrics.avgParagraphDistance, 2);
+            }
+            metrics.stdParagraphDistance = Math.sqrt(variance / paragraphDistances.size());
+        }
+
+        // Text structure
+        metrics.sentenceCount = fdoc.getSentences().size();
+        metrics.paragraphCount = fdoc.getParagraphs().size();
+        // Approximate token count from full text
+        String fullText = fdoc.getText();
+        if (fullText != null && !fullText.isEmpty()) {
+            metrics.tokenCount = fullText.split("\\W+").length;
+        }
+
+        if (metrics.sentenceCount > 0) {
+            metrics.avgSentenceLength = (double) metrics.tokenCount / metrics.sentenceCount;
+            metrics.entitiesPerSentence = (double) metrics.totalMentionCount / metrics.sentenceCount;
+        }
+
+        if (metrics.paragraphCount > 0) {
+            metrics.avgParagraphLength = (double) metrics.sentenceCount / metrics.paragraphCount;
+            metrics.entitiesPerParagraph = (double) metrics.totalMentionCount / metrics.paragraphCount;
+        }
+
+        if (metrics.tokenCount > 0) {
+            metrics.entityDensity = (double) metrics.totalMentionCount / metrics.tokenCount;
+        }
+
+        // Coverage ratios
+        metrics.sentencesWithEntities = sentencesWithEntities.size();
+        metrics.paragraphsWithEntities = paragraphsWithEntities.size();
+        if (metrics.sentenceCount > 0) {
+            metrics.sentenceCoverageRatio = (double) metrics.sentencesWithEntities / metrics.sentenceCount;
+        }
+        if (metrics.paragraphCount > 0) {
+            metrics.paragraphCoverageRatio = (double) metrics.paragraphsWithEntities / metrics.paragraphCount;
+        }
+
+        // Remention and persistence metrics
+        metrics.rementionCount = 0;
+        for (Integer count : entityMentionCount.values()) {
+            if (count > 1) {
+                metrics.rementionCount += (count - 1);
+            }
+        }
+
+        if (metrics.uniqueEntityCount > 0) {
+            metrics.avgRementionsPerEntity = (double) metrics.rementionCount / metrics.uniqueEntityCount;
+        }
+
+        // Entity persistence (entities appearing in multiple paragraphs)
+        Map<String, Set<Integer>> entityParagraphs = new HashMap<>();
+        for (dws.uni.mannheim.semantic_complexity.Mention m : fdoc.getMentions()) {
+            Integer paragraphIndex = fdoc.getMapConceptToParagraph().get(m);
+            if (paragraphIndex != null) {
+                entityParagraphs.computeIfAbsent(m.getMentionedConcept(), k -> new HashSet<>()).add(paragraphIndex);
+            }
+        }
+        for (Set<Integer> paragraphs : entityParagraphs.values()) {
+            if (paragraphs.size() > 1) {
+                metrics.entityPersistence++;
+            }
+        }
+
+        // Carried forward entities (entities continuing from one paragraph to next)
+        if (metrics.paragraphCount > 1) {
+            for (int i = 0; i < metrics.paragraphCount - 1; i++) {
+                Set<String> currentParEntities = new HashSet<>();
+                Set<String> nextParEntities = new HashSet<>();
+
+                for (Map.Entry<String, Set<Integer>> entry : entityParagraphs.entrySet()) {
+                    if (entry.getValue().contains(i)) currentParEntities.add(entry.getKey());
+                    if (entry.getValue().contains(i + 1)) nextParEntities.add(entry.getKey());
+                }
+
+                // Count entities that appear in both consecutive paragraphs
+                for (String entity : currentParEntities) {
+                    if (nextParEntities.contains(entity)) {
+                        metrics.carriedForwardEntities++;
+                    }
+                }
+            }
+        }
+
+        // Compute activation statistics from EOS activations (per mention)
+        for (String mode : activationAtEOS.keySet()) {
+            Map<Mention, Double> eosActivations = activationAtEOS.get(mode);
+            if (eosActivations != null && !eosActivations.isEmpty()) {
+                double sum = 0.0, min = Double.MAX_VALUE, max = 0.0;
+                List<Double> values = new ArrayList<>();
+
+                for (Double v : eosActivations.values()) {
+                    if (v != null && v > 0) {  // only count non-zero activations
+                        sum += v;
+                        values.add(v);
+                        if (v < min) min = v;
+                        if (v > max) max = v;
+                    }
+                }
+
+                if (!values.isEmpty()) {
+                    metrics.activationMin = min;
+                    metrics.activationMax = max;
+
+                    // Compute standard deviation
+                    double mean = sum / values.size();
+                    double variance = 0.0;
+                    for (Double v : values) {
+                        variance += Math.pow(v - mean, 2);
+                    }
+                    metrics.activationStdDev = Math.sqrt(variance / values.size());
+
+                    // Compute median
+                    java.util.Collections.sort(values);
+                    int mid = values.size() / 2;
+                    metrics.activationMedian = values.size() % 2 == 0 ?
+                        (values.get(mid - 1) + values.get(mid)) / 2.0 :
+                        values.get(mid);
+                }
+                break;  // Only need to compute once (same for all modes)
+            }
+        }
+
+        // Compute per-entity coherence scores (average of per-entity products)
+        computePerEntityCoherenceScores(fdoc, metrics, entityMentionCount, entityParagraphs,
+                                        activationAtEOS, activationAtEOP, activationAtEODoc);
+
+        // Compute pairwise entity relatedness metrics (document-level)
+        computePairwiseRelatednessMetrics(metrics, pairwiseRelatedness, maxActivationPerEntity);
+
+        // Compute paragraph-level pairwise entity relatedness metrics
+        computeParagraphLevelPairwiseRelatedness(metrics, pairwiseRelatedness,
+                                                  entitiesPerParagraph, maxActivationPerEntityPerParagraph);
+
+        // Compute derived scores
+        metrics.computeTokenCoherence();
+        metrics.computeActivationDecay();
+        metrics.computeActivationStability();
+        metrics.computeCompositeScores();
+
+        return metrics;
+    }
+
+    /**
+     * Computes per-entity coherence scores by calculating metrics separately for each entity,
+     * then aggregating across entities using both mean and median.
+     *
+     * This approach differs from the aggregate scores which use "product of averages".
+     * Per-entity scores use "average of products" which better captures individual entity coherence patterns.
+     */
+    private void computePerEntityCoherenceScores(
+            LinkedDocument fdoc,
+            CoherenceMetrics metrics,
+            Map<String, Integer> entityMentionCount,
+            Map<String, Set<Integer>> entityParagraphs,
+            Map<String, Map<Mention, Double>> activationAtEOS,
+            Map<String, Map<Mention, Double>> activationAtEOP,
+            Map<String, Map<Mention, Double>> activationAtEODoc)
+    {
+        // Group mentions by entity
+        Map<String, List<Mention>> mentionsByEntity = new HashMap<>();
+        for (Mention m : fdoc.getMentions()) {
+            String entityUri = m.getMentionedConcept();
+            mentionsByEntity.computeIfAbsent(entityUri, k -> new ArrayList<>()).add(m);
+        }
+
+        // Sort each entity's mentions by token position for distance calculation
+        for (List<Mention> mentions : mentionsByEntity.values()) {
+            mentions.sort((m1, m2) -> Integer.compare(m1.getTokenOffsetEnd(), m2.getTokenOffsetEnd()));
+        }
+
+        // Track which mode to use (just use the first mode available)
+        String mode = null;
+        for (String m : activationAtEOS.keySet()) {
+            mode = m;
+            break;
+        }
+        if (mode == null) return;  // No modes available
+
+        // Calculate per-entity coherence scores
+        List<Double> entityCohesionScores = new ArrayList<>();
+        List<Double> topicPersistenceScores = new ArrayList<>();
+        List<Double> localCoherenceScores = new ArrayList<>();
+        List<Double> globalCoherenceScores = new ArrayList<>();
+
+        // Build sentence and paragraph indices for all mentions
+        Map<Mention, Integer> mentionSentenceIndex = new HashMap<>();
+        Map<Mention, Integer> mentionParagraphIndex = new HashMap<>();
+        int sentenceIdx = 0;
+        int paragraphIdx = 0;
+        for (Paragraph p : fdoc.getParagraphs()) {
+            for (Sentence s : p.getSentences()) {
+                for (Mention m : s.getMentions()) {
+                    mentionSentenceIndex.put(m, sentenceIdx);
+                    mentionParagraphIndex.put(m, paragraphIdx);
+                }
+                sentenceIdx++;
+            }
+            paragraphIdx++;
+        }
+
+        // For each entity, calculate its coherence metrics
+        for (Map.Entry<String, List<Mention>> entry : mentionsByEntity.entrySet()) {
+            String entityUri = entry.getKey();
+            List<Mention> mentions = entry.getValue();
+
+            if (mentions.size() < 1) continue;  // Skip entities with no mentions
+
+            // Calculate per-entity rementions (mentions beyond first)
+            int entityRementions = Math.max(0, mentions.size() - 1);
+
+            // Calculate per-entity average sentence distance
+            List<Integer> sentenceDistances = new ArrayList<>();
+            for (int i = 1; i < mentions.size(); i++) {
+                Integer prevSentence = mentionSentenceIndex.get(mentions.get(i-1));
+                Integer currSentence = mentionSentenceIndex.get(mentions.get(i));
+                if (prevSentence != null && currSentence != null) {
+                    sentenceDistances.add(currSentence - prevSentence);
+                }
+            }
+            double avgSentenceDistance = 0.0;
+            if (!sentenceDistances.isEmpty()) {
+                int sum = 0;
+                for (int dist : sentenceDistances) {
+                    sum += dist;
+                }
+                avgSentenceDistance = (double) sum / sentenceDistances.size();
+            }
+
+            // Calculate per-entity average paragraph distance
+            List<Integer> paragraphDistances = new ArrayList<>();
+            for (int i = 1; i < mentions.size(); i++) {
+                Integer prevParagraph = mentionParagraphIndex.get(mentions.get(i-1));
+                Integer currParagraph = mentionParagraphIndex.get(mentions.get(i));
+                if (prevParagraph != null && currParagraph != null) {
+                    paragraphDistances.add(currParagraph - prevParagraph);
+                }
+            }
+            double avgParagraphDistance = 0.0;
+            if (!paragraphDistances.isEmpty()) {
+                int sum = 0;
+                for (int dist : paragraphDistances) {
+                    sum += dist;
+                }
+                avgParagraphDistance = (double) sum / paragraphDistances.size();
+            }
+
+            // Get per-entity activation values (average across this entity's mentions)
+            Map<Mention, Double> eosActivations = activationAtEOS.get(mode);
+            Map<Mention, Double> eopActivations = activationAtEOP.get(mode);
+            Map<Mention, Double> eodocActivations = activationAtEODoc.get(mode);
+
+            double entityActivationEOS = 0.0;
+            double entityActivationEOP = 0.0;
+            double entityActivationEODoc = 0.0;
+            int activationCount = 0;
+
+            if (eosActivations != null && eopActivations != null && eodocActivations != null) {
+                for (Mention m : mentions) {
+                    Double eos = eosActivations.get(m);
+                    Double eop = eopActivations.get(m);
+                    Double eodoc = eodocActivations.get(m);
+                    if (eos != null && eop != null && eodoc != null) {
+                        entityActivationEOS += eos;
+                        entityActivationEOP += eop;
+                        entityActivationEODoc += eodoc;
+                        activationCount++;
+                    }
+                }
+                if (activationCount > 0) {
+                    entityActivationEOS /= activationCount;
+                    entityActivationEOP /= activationCount;
+                    entityActivationEODoc /= activationCount;
+                }
+            }
+
+            // Check if entity appears in multiple paragraphs
+            Set<Integer> entityParagraphSet = entityParagraphs.get(entityUri);
+            boolean persistsAcrossParagraphs = (entityParagraphSet != null && entityParagraphSet.size() > 1);
+
+            // Calculate Entity Cohesion Score for this entity
+            // Formula: rementions × (1/(1+avgSentenceDistance)) × max(activationEOS, activationEODoc)
+            if (mentions.size() > 1 && avgSentenceDistance >= 0) {
+                double rementionFactor = (double) entityRementions;
+                double proximityFactor = 1.0 / (1.0 + avgSentenceDistance);
+                double activationFactor = Math.max(entityActivationEOS, entityActivationEODoc);
+                entityCohesionScores.add(rementionFactor * proximityFactor * activationFactor);
+            }
+
+            // Calculate Topic Persistence Score for this entity
+            // Formula: (entityPersistence) × (1-decayRate) × coverage
+            // For per-entity: use presence across paragraphs as persistence indicator
+            if (metrics.paragraphCount > 0 && entityParagraphSet != null) {
+                double persistenceFactor = persistsAcrossParagraphs ? 1.0 : 0.0;
+                // Decay rate for this entity
+                double entityDecayRate = 0.0;
+                if (entityActivationEOS > 0) {
+                    entityDecayRate = Math.max(0, (entityActivationEOS - entityActivationEODoc) / entityActivationEOS);
+                }
+                double coverageFactor = (double) mentions.size() / metrics.sentenceCount;
+                topicPersistenceScores.add(persistenceFactor * (1.0 - entityDecayRate) * coverageFactor);
+            }
+
+            // Calculate Local Coherence Score for this entity
+            // Formula: (1/avgSentenceDistance) × mentionsPerSentence × carryForwardFactor
+            if (metrics.sentenceCount > 1 && avgSentenceDistance > 0) {
+                double proximityFactor = 1.0 / avgSentenceDistance;
+                double densityFactor = (double) mentions.size() / metrics.sentenceCount;
+                // Carry-forward: check if entity appears in consecutive sentences
+                int carryForwardCount = 0;
+                for (int i = 1; i < mentions.size(); i++) {
+                    Integer prevSent = mentionSentenceIndex.get(mentions.get(i-1));
+                    Integer currSent = mentionSentenceIndex.get(mentions.get(i));
+                    if (prevSent != null && currSent != null && currSent - prevSent == 1) {
+                        carryForwardCount++;
+                    }
+                }
+                double carryForwardFactor = (double) carryForwardCount / metrics.sentenceCount;
+                localCoherenceScores.add(proximityFactor * densityFactor * carryForwardFactor);
+            }
+
+            // Calculate Global Coherence Score for this entity
+            // Formula: activation × paragraphCoverage × persistenceFactor
+            if (metrics.paragraphCount > 0 && entityParagraphSet != null) {
+                double activation = Math.max(entityActivationEOP, entityActivationEODoc);
+                if (activation < 1e-10) activation = entityActivationEOS;  // Fallback
+                double coverage = (double) entityParagraphSet.size() / metrics.paragraphCount;
+                double persistenceFactor = persistsAcrossParagraphs ? 1.0 : 0.0;
+                globalCoherenceScores.add(activation * coverage * persistenceFactor);
+            }
+        }
+
+        // Compute mean and median for each score type
+        metrics.entityCohesionScore_PerEntityMean = computeMean(entityCohesionScores);
+        metrics.entityCohesionScore_PerEntityMedian = computeMedian(entityCohesionScores);
+        metrics.topicPersistenceScore_PerEntityMean = computeMean(topicPersistenceScores);
+        metrics.topicPersistenceScore_PerEntityMedian = computeMedian(topicPersistenceScores);
+        metrics.localCoherenceScore_PerEntityMean = computeMean(localCoherenceScores);
+        metrics.localCoherenceScore_PerEntityMedian = computeMedian(localCoherenceScores);
+        metrics.globalCoherenceScore_PerEntityMean = computeMean(globalCoherenceScores);
+        metrics.globalCoherenceScore_PerEntityMedian = computeMedian(globalCoherenceScores);
+    }
+
+    /**
+     * Computes the mean of a list of doubles.
+     */
+    private double computeMean(List<Double> values) {
+        if (values == null || values.isEmpty()) return 0.0;
+        double sum = 0.0;
+        for (double v : values) {
+            sum += v;
+        }
+        return sum / values.size();
+    }
+
+    /**
+     * Computes the median of a list of doubles.
+     */
+    private double computeMedian(List<Double> values) {
+        if (values == null || values.isEmpty()) return 0.0;
+        List<Double> sorted = new ArrayList<>(values);
+        java.util.Collections.sort(sorted);
+        int size = sorted.size();
+        if (size % 2 == 0) {
+            return (sorted.get(size / 2 - 1) + sorted.get(size / 2)) / 2.0;
+        } else {
+            return sorted.get(size / 2);
+        }
+    }
+
+    /**
+     * Computes pairwise entity relatedness metrics based on cross-activation patterns.
+     * Measures how strongly related entities are through the knowledge graph by tracking
+     * how much activation flows between entity pairs during spreading activation.
+     *
+     * @param metrics The metrics object to populate
+     * @param pairwiseRelatedness Map of source entity -> target entity -> activation strength
+     * @param maxActivationPerEntity Map of entity URI -> maximum activation level reached
+     */
+    private void computePairwiseRelatednessMetrics(CoherenceMetrics metrics,
+                                                    Map<String, Map<String, Double>> pairwiseRelatedness,
+                                                    Map<String, Double> maxActivationPerEntity) {
+        if (pairwiseRelatedness.isEmpty()) {
+            return;
+        }
+
+        double totalRelatedness = 0.0;
+        double totalWeightedRelatedness = 0.0;
+        double maxRelatedness = 0.0;
+        int pairCount = 0;
+
+        // Iterate through all entity pairs
+        for (Map.Entry<String, Map<String, Double>> sourceEntry : pairwiseRelatedness.entrySet()) {
+            String sourceEntity = sourceEntry.getKey();
+            double sourceMaxActivation = maxActivationPerEntity.getOrDefault(sourceEntity, 0.0);
+
+            for (Map.Entry<String, Double> targetEntry : sourceEntry.getValue().entrySet()) {
+                String targetEntity = targetEntry.getKey();
+                double crossActivation = targetEntry.getValue();
+
+                if (crossActivation > 0.0) {
+                    pairCount++;
+                    totalRelatedness += crossActivation;
+
+                    // Weight by maximum activation of the two entities
+                    double targetMaxActivation = maxActivationPerEntity.getOrDefault(targetEntity, 0.0);
+                    double maxActivationOfPair = Math.max(sourceMaxActivation, targetMaxActivation);
+                    totalWeightedRelatedness += crossActivation * maxActivationOfPair;
+
+                    // Track maximum pairwise relatedness
+                    maxRelatedness = Math.max(maxRelatedness, crossActivation);
+                }
+            }
+        }
+
+        // Compute averages
+        if (pairCount > 0) {
+            metrics.avgPairwiseRelatedness = totalRelatedness / pairCount;
+            metrics.avgPairwiseRelatednessWeightedByMaxActivation = totalWeightedRelatedness / pairCount;
+            metrics.maxPairwiseRelatedness = maxRelatedness;
+            metrics.entityPairCount = pairCount;
+        }
+    }
+
+    /**
+     * Computes paragraph-level pairwise entity relatedness metrics.
+     * For each paragraph, filters the document-level pairwise relatedness to only include
+     * entity pairs that both appear in that paragraph. Then aggregates across paragraphs
+     * weighted by paragraph activation.
+     *
+     * @param metrics The metrics object to populate
+     * @param pairwiseRelatedness Document-level pairwise relatedness data
+     * @param entitiesPerParagraph Map of paragraph -> set of entities in that paragraph
+     * @param maxActivationPerEntityPerParagraph Map of paragraph -> (entity -> max activation in that paragraph)
+     */
+    private void computeParagraphLevelPairwiseRelatedness(CoherenceMetrics metrics,
+                                                           Map<String, Map<String, Double>> pairwiseRelatedness,
+                                                           Map<Integer, Set<String>> entitiesPerParagraph,
+                                                           Map<Integer, Map<String, Double>> maxActivationPerEntityPerParagraph) {
+        if (entitiesPerParagraph.isEmpty() || pairwiseRelatedness.isEmpty()) {
+            return;
+        }
+
+        double totalParagraphRelatedness = 0.0;
+        double totalWeightedParagraphRelatedness = 0.0;
+        int paragraphCount = 0;
+
+        // Iterate through each paragraph
+        for (Map.Entry<Integer, Set<String>> paragraphEntry : entitiesPerParagraph.entrySet()) {
+            Integer paragraphIndex = paragraphEntry.getKey();
+            Set<String> paragraphEntities = paragraphEntry.getValue();
+
+            if (paragraphEntities.size() < 2) {
+                // Need at least 2 entities for pairwise relatedness
+                continue;
+            }
+
+            Map<String, Double> paragraphMaxActivations = maxActivationPerEntityPerParagraph.get(paragraphIndex);
+
+            // Compute average pairwise relatedness for this paragraph
+            double paragraphRelatednessSum = 0.0;
+            int paragraphPairCount = 0;
+
+            // Find maximum activation in this paragraph (for weighting)
+            double maxParagraphActivation = 0.0;
+            if (paragraphMaxActivations != null) {
+                for (double activation : paragraphMaxActivations.values()) {
+                    maxParagraphActivation = Math.max(maxParagraphActivation, activation);
+                }
+            }
+
+            // Sum up pairwise relatedness for entity pairs both in this paragraph
+            double paragraphWeightedSum = 0.0;  // For weighted version
+
+            for (String sourceEntity : paragraphEntities) {
+                if (!pairwiseRelatedness.containsKey(sourceEntity)) {
+                    continue;
+                }
+
+                double sourceMaxActivation = paragraphMaxActivations != null ?
+                    paragraphMaxActivations.getOrDefault(sourceEntity, 0.0) : 0.0;
+
+                for (String targetEntity : paragraphEntities) {
+                    if (sourceEntity.equals(targetEntity)) {
+                        continue;
+                    }
+                    // Check if there's cross-activation from source to target
+                    Double crossActivation = pairwiseRelatedness.get(sourceEntity).get(targetEntity);
+                    if (crossActivation != null && crossActivation > 0.0) {
+                        paragraphRelatednessSum += crossActivation;
+
+                        // Weight by max activation of the pair (like document-level)
+                        double targetMaxActivation = paragraphMaxActivations != null ?
+                            paragraphMaxActivations.getOrDefault(targetEntity, 0.0) : 0.0;
+                        double maxActivationOfPair = Math.max(sourceMaxActivation, targetMaxActivation);
+                        paragraphWeightedSum += crossActivation * maxActivationOfPair;
+
+                        paragraphPairCount++;
+                    }
+                }
+            }
+
+            // Compute averages for this paragraph
+            if (paragraphPairCount > 0) {
+                double paragraphAvgRelatedness = paragraphRelatednessSum / paragraphPairCount;
+                double paragraphWeightedAvg = paragraphWeightedSum / paragraphPairCount;
+
+                totalParagraphRelatedness += paragraphAvgRelatedness;
+                totalWeightedParagraphRelatedness += paragraphWeightedAvg;
+                paragraphCount++;
+            }
+        }
+
+        // Compute document-level averages across paragraphs
+        if (paragraphCount > 0) {
+            metrics.avgPairwiseRelatednessPerParagraph = totalParagraphRelatedness / paragraphCount;
+            metrics.avgPairwiseRelatednessPerParagraphWeightedByActivation = totalWeightedParagraphRelatedness / paragraphCount;
         }
     }
 
